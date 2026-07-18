@@ -58,6 +58,8 @@ const initialUI: UIState = {
   filters: { time: "24h", verified: false },
   vote: null,
   cooldownMsg: null,
+  detailReportId: null,
+  detailMsg: null,
 };
 
 type Action =
@@ -78,7 +80,9 @@ type Action =
   | { type: "SET_VOTE"; vote: VoteKind }
   | { type: "SET_TIME"; time: TimeRange }
   | { type: "TOGGLE_VERIFIED" }
-  | { type: "SET_COOLDOWN_MSG"; msg: string | null };
+  | { type: "SET_COOLDOWN_MSG"; msg: string | null }
+  | { type: "OPEN_REPORT_DETAIL"; reportId: string }
+  | { type: "SET_DETAIL_MSG"; msg: string | null };
 
 function reducer(state: UIState, action: Action): UIState {
   switch (action.type) {
@@ -93,7 +97,14 @@ function reducer(state: UIState, action: Action): UIState {
     case "OPEN_FILTER":
       return { ...state, sheet: "filter" };
     case "CLOSE_SHEET":
-      return { ...state, sheet: null, step: null, cooldownMsg: null };
+      return {
+        ...state,
+        sheet: null,
+        step: null,
+        cooldownMsg: null,
+        detailReportId: null,
+        detailMsg: null,
+      };
     case "SET_STEP":
       return { ...state, step: action.step };
     case "SET_MODE":
@@ -126,6 +137,15 @@ function reducer(state: UIState, action: Action): UIState {
       };
     case "SET_COOLDOWN_MSG":
       return { ...state, cooldownMsg: action.msg };
+    case "OPEN_REPORT_DETAIL":
+      return {
+        ...state,
+        sheet: "reportDetail",
+        detailReportId: action.reportId,
+        detailMsg: null,
+      };
+    case "SET_DETAIL_MSG":
+      return { ...state, detailMsg: action.msg };
     default:
       return state;
   }
@@ -160,6 +180,11 @@ export interface FloodStore {
   confirmArea: () => void;
   disputeArea: () => void;
   reportHere: () => void;
+  // per-report verification
+  openReportDetail: (reportId: string) => void;
+  voteReport: (kind: VoteKind) => void;
+  /** Report IDs this device voted on this session (for button state). */
+  votedReports: Set<string>;
   // filters
   setTime: (t: TimeRange) => void;
   toggleVerified: () => void;
@@ -198,6 +223,10 @@ export function FloodProvider({
   // Onboarding is intentionally in-memory only (no local storage): shown once
   // per page load, dismissed for the rest of the session.
   const [onboardingDone, setOnboardingDone] = useState(false);
+  // Reports this device voted on this session (server enforces real dedup).
+  const [votedReports, setVotedReports] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   const mapRef = useRef<LeafletMap | null>(null);
 
@@ -413,6 +442,63 @@ export function FloodProvider({
   const disputeArea = useCallback(() => castVote("disputed"), [castVote]);
   const reportHere = useCallback(() => dispatch({ type: "OPEN_REPORT" }), []);
 
+  // ---- per-report verification ----
+  const openReportDetail = useCallback(
+    (reportId: string) =>
+      dispatch({ type: "OPEN_REPORT_DETAIL", reportId }),
+    [],
+  );
+
+  const voteReport = useCallback(
+    async (kind: VoteKind) => {
+      const reportId = ui.detailReportId;
+      if (!reportId || votedReports.has(reportId)) return;
+      setVotedReports((prev) => new Set(prev).add(reportId));
+      try {
+        const res = await fetch("/api/votes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reportId, kind }),
+        });
+        if (res.status === 409) {
+          dispatch({
+            type: "SET_DETAIL_MSG",
+            msg: "You already voted on this report.",
+          });
+          return;
+        }
+        if (!res.ok) {
+          dispatch({
+            type: "SET_DETAIL_MSG",
+            msg: "Couldn't record your vote — please try again.",
+          });
+          return;
+        }
+        const data = (await res.json()) as {
+          verified?: boolean;
+          removed?: boolean;
+        };
+        dispatch({
+          type: "SET_DETAIL_MSG",
+          msg: data.removed
+            ? "✓ Thanks — enough people marked this cleared, so it's been removed."
+            : kind === "confirmed"
+              ? data.verified
+                ? "✓ Verified — thanks, enough neighbours confirmed this."
+                : "✓ Thanks — you confirmed this report."
+              : "✓ Noted — you marked this as cleared.",
+        });
+        refetch();
+      } catch {
+        dispatch({
+          type: "SET_DETAIL_MSG",
+          msg: "Network error — please try again.",
+        });
+      }
+    },
+    [ui.detailReportId, votedReports, refetch],
+  );
+
   // ---- filters ----
   const setTime = useCallback(
     (t: TimeRange) => dispatch({ type: "SET_TIME", time: t }),
@@ -450,6 +536,9 @@ export function FloodProvider({
       confirmArea,
       disputeArea,
       reportHere,
+      openReportDetail,
+      voteReport,
+      votedReports,
       setTime,
       toggleVerified,
       registerMap,
@@ -481,6 +570,9 @@ export function FloodProvider({
       confirmArea,
       disputeArea,
       reportHere,
+      openReportDetail,
+      voteReport,
+      votedReports,
       setTime,
       toggleVerified,
       registerMap,

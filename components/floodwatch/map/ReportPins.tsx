@@ -7,12 +7,16 @@ import { useFlood } from "@/lib/floodwatch/store";
 import { REGIONS, regionReportCount } from "@/lib/floodwatch/geo";
 
 function regionIcon(name: string, count: number): L.DivIcon {
+  // A large transparent circle is the click target (easy to tap anywhere on
+  // the blob), with the label centred inside it.
   return L.divIcon({
     className: "fw-region-icon",
     html: `
-      <div style="transform:translate(-50%,-50%);text-align:center;white-space:nowrap;pointer-events:auto;cursor:pointer">
-        <div style="font:700 13px var(--font-sans),sans-serif;color:#12294a;text-shadow:0 1px 3px rgba(235,241,245,.9),0 0 6px rgba(235,241,245,.9)">${name}</div>
-        <div style="font:500 9.5px var(--font-mono),monospace;color:#3e5170;text-shadow:0 1px 3px rgba(235,241,245,.9)">${count} report${count === 1 ? "" : "s"}</div>
+      <div style="width:116px;height:116px;transform:translate(-50%,-50%);border-radius:50%;display:flex;align-items:center;justify-content:center;pointer-events:auto;cursor:pointer">
+        <div style="text-align:center;white-space:nowrap">
+          <div style="font:700 13px var(--font-sans),sans-serif;color:#12294a;text-shadow:0 1px 3px rgba(235,241,245,.9),0 0 6px rgba(235,241,245,.9)">${name}</div>
+          <div style="font:500 9.5px var(--font-mono),monospace;color:#3e5170;text-shadow:0 1px 3px rgba(235,241,245,.9)">${count} report${count === 1 ? "" : "s"}</div>
+        </div>
       </div>`,
     iconSize: [0, 0],
     iconAnchor: [0, 0],
@@ -35,7 +39,8 @@ function amberPin(): L.DivIcon {
 }
 
 export default function ReportPins() {
-  const { reports, visibleReports, openArea, ui } = useFlood();
+  const { reports, visibleReports, openArea, openReportDetail, ui } =
+    useFlood();
 
   const counts = useMemo(
     () =>
@@ -57,21 +62,25 @@ export default function ReportPins() {
 
   return (
     <>
-      {REGIONS.map((region) => (
-        <Marker
-          key={region.key}
-          position={[region.lat, region.lng]}
-          icon={regionIcon(region.name, counts[region.key] ?? 0)}
-          interactive={ui.step !== "placing"}
-          eventHandlers={{ click: () => openArea(region.key) }}
-        />
-      ))}
+      {REGIONS.filter((region) => (counts[region.key] ?? 0) > 0).map(
+        (region) => (
+          <Marker
+            key={region.key}
+            position={[region.lat, region.lng]}
+            icon={regionIcon(region.name, counts[region.key] ?? 0)}
+            interactive={ui.step !== "placing"}
+            eventHandlers={{ click: () => openArea(region.key) }}
+          />
+        ),
+      )}
       {unverifiedPins.map((r) => (
         <Marker
           key={r.id}
           position={[r.lat, r.lng]}
           icon={amberPin()}
-          interactive={false}
+          interactive={ui.step !== "placing"}
+          zIndexOffset={1000}
+          eventHandlers={{ click: () => openReportDetail(r.id) }}
         />
       ))}
     </>

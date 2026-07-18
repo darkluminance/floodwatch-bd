@@ -14,6 +14,7 @@ import ReportDetailsSheet from "./sheets/ReportDetailsSheet";
 import DoneSheet from "./sheets/DoneSheet";
 import AreaSheet from "./sheets/AreaSheet";
 import FilterSheet from "./sheets/FilterSheet";
+import ReportDetailSheet from "./sheets/ReportDetailSheet";
 
 // Leaflet touches `window`, so the map is client-only. `ssr:false` is only
 // legal inside a Client Component (this file) in Next 16.
@@ -32,6 +33,7 @@ function Sheets() {
   if (isReport && ui.step === "done") return <DoneSheet />;
   if (ui.sheet === "area") return <AreaSheet />;
   if (ui.sheet === "filter") return <FilterSheet />;
+  if (ui.sheet === "reportDetail") return <ReportDetailSheet />;
   return null;
 }
 

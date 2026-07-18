@@ -13,6 +13,7 @@ const REPORTS_KEY = "fw:reports";
 const VOTES_KEY = "fw:votes"; // hash, fields `${region}:confirm|dispute`
 const cooldownKey = (ip: string) => `fw:cooldown:${ip}`;
 const votedKey = (region: string, ip: string) => `fw:voted:${region}:${ip}`;
+const reportVotedKey = (id: string, ip: string) => `fw:rvoted:${id}:${ip}`;
 
 const COOLDOWN_SECONDS = 180;
 const MAX_REPORTS = 500;
@@ -28,6 +29,11 @@ export class CooldownError extends Error {
 export class OutOfBoundsError extends Error {}
 export class AlreadyVotedError extends Error {}
 export class InvalidVoteError extends Error {}
+export class ReportNotFoundError extends Error {}
+
+/** Confirmations needed to mark a report verified; disputes to clear it. */
+export const CONFIRM_THRESHOLD = 2;
+export const DISPUTE_THRESHOLD = 2;
 
 /**
  * Client IP for rate-limiting. Assumes a single trusted reverse proxy
@@ -55,6 +61,8 @@ interface KV {
   rpush(key: string, ...vals: string[]): Promise<number>;
   lrange(key: string, start: number, stop: number): Promise<string[]>;
   ltrim(key: string, start: number, stop: number): Promise<unknown>;
+  lset(key: string, index: number, val: string): Promise<unknown>;
+  lrem(key: string, count: number, val: string): Promise<number>;
   getStr(key: string): Promise<string | null>;
   /** SET key 1 NX EX <seconds>. Returns true if newly set (not on cooldown). */
   setNxEx(key: string, seconds: number): Promise<boolean>;
@@ -78,6 +86,12 @@ class RedisKV implements KV {
   }
   ltrim(key: string, start: number, stop: number) {
     return this.r.ltrim(key, start, stop);
+  }
+  lset(key: string, index: number, val: string) {
+    return this.r.lset(key, index, val);
+  }
+  lrem(key: string, count: number, val: string) {
+    return this.r.lrem(key, count, val);
   }
   async getStr(key: string) {
     return (await this.r.get(key)) as string | null;
@@ -148,6 +162,19 @@ class MemoryKV implements KV {
   ltrim(key: string, start: number, stop: number) {
     this.lists.set(key, redisSlice(this.lists.get(key) ?? [], start, stop));
     return Promise.resolve("OK");
+  }
+  lset(key: string, index: number, val: string) {
+    const l = this.lists.get(key);
+    if (l && index >= 0 && index < l.length) l[index] = val;
+    return Promise.resolve("OK");
+  }
+  lrem(key: string, count: number, val: string) {
+    const l = this.lists.get(key);
+    if (!l) return Promise.resolve(0);
+    const kept = l.filter((v) => v !== val);
+    const removed = l.length - kept.length;
+    this.lists.set(key, kept);
+    return Promise.resolve(removed);
   }
   getStr(key: string) {
     const c = this.scalars.get(key);
@@ -337,6 +364,63 @@ export async function castVote(
   if (!first) throw new AlreadyVotedError();
   const field = `${region}:${kind === "confirmed" ? "confirm" : "dispute"}`;
   await kv.hincrby(VOTES_KEY, field, 1);
+}
+
+export interface ReportVoteResult {
+  report: Report;
+  verified: boolean;
+  removed: boolean;
+}
+
+/**
+ * Confirm/dispute a single report. One vote per device/IP per report. Enough
+ * confirmations mark it verified; enough disputes clear (remove) it.
+ */
+export async function voteReport(
+  reportId: string,
+  kind: VoteKind,
+  ip: string,
+): Promise<ReportVoteResult> {
+  if (
+    typeof reportId !== "string" ||
+    !reportId ||
+    reportId.length > 64 ||
+    (kind !== "confirmed" && kind !== "disputed")
+  ) {
+    throw new InvalidVoteError();
+  }
+  const kv = getKV();
+
+  const raw = await kv.lrange(REPORTS_KEY, 0, -1);
+  let index = -1;
+  let rawEntry = "";
+  let report: Report | null = null;
+  for (let i = 0; i < raw.length; i++) {
+    const r = parseReport(raw[i]);
+    if (r && r.id === reportId) {
+      index = i;
+      rawEntry = raw[i];
+      report = r;
+      break;
+    }
+  }
+  if (!report) throw new ReportNotFoundError();
+
+  // Dedup only after we know the report exists.
+  const first = await kv.setNxVal(reportVotedKey(reportId, ip), kind);
+  if (!first) throw new AlreadyVotedError();
+
+  if (kind === "confirmed") report.votes.confirm += 1;
+  else report.votes.dispute += 1;
+
+  if (report.votes.dispute >= DISPUTE_THRESHOLD) {
+    await kv.lrem(REPORTS_KEY, 1, rawEntry);
+    return { report, verified: false, removed: true };
+  }
+
+  if (report.votes.confirm >= CONFIRM_THRESHOLD) report.verified = true;
+  await kv.lset(REPORTS_KEY, index, JSON.stringify(report));
+  return { report, verified: report.verified, removed: false };
 }
 
 // ---- geocode response cache + per-IP rate limit ----

@@ -39,7 +39,7 @@ export interface Filters {
 }
 
 export type Screen = "onboarding" | "map";
-export type SheetKind = "report" | "area" | "filter" | null;
+export type SheetKind = "report" | "area" | "filter" | "reportDetail" | null;
 export type ReportStep =
   | "mode"
   | "locating"
@@ -60,4 +60,8 @@ export interface UIState {
   vote: VoteKind | null;
   /** Message shown when a submission is blocked by the cooldown. */
   cooldownMsg: string | null;
+  /** Report shown in the per-report detail sheet. */
+  detailReportId: string | null;
+  /** Feedback message inside the report detail sheet after voting. */
+  detailMsg: string | null;
 }
