@@ -41,9 +41,16 @@ shared live across everyone viewing the map.
 ## Getting started
 
 ```bash
+# with npm
+npm install
+npm run dev
+
+# or with Bun (the repo ships a bun.lock)
 bun install
 bun run dev
 ```
+
+(`yarn` and `pnpm` work too — `yarn dev`, `pnpm dev`.)
 
 Open [http://localhost:3000](http://localhost:3000).
 
@@ -68,14 +75,19 @@ Restart the dev server. The map is now shared across all users and survives rest
 
 ## Scripts
 
+Use `npm run <script>` (or `bun run`, `yarn`, `pnpm`):
+
 | Command | Description |
 | --- | --- |
-| `bun run dev` | Start the dev server (Turbopack) |
-| `bun run build` | Production build |
-| `bun run start` | Serve the production build |
-| `bun run lint` | Run ESLint |
-| `bun run reset` | Dry-run: list the `fw:*` keys that would be deleted |
-| `bun run reset --yes` | Wipe all reports/votes → the map starts empty |
+| `dev` | Start the dev server (Turbopack) |
+| `build` | Production build |
+| `start` | Serve the production build |
+| `lint` | Run ESLint |
+| `reset` | Dry-run: list the `fw:*` keys that would be deleted |
+| `reset --yes` | Wipe all reports/votes → the map starts empty |
+
+> **Note:** `reset` runs a TypeScript script and reads `.env`, so it needs **Bun**
+> (`bun run reset`). Everything else works with any package manager.
 
 ## API
 
