@@ -1,36 +1,137 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# FloodWatch BD 🌊
 
-## Getting Started
+A live, citizen-powered flood map for **Bangladesh**. Anyone can see flooded areas
+in real time and report new ones in seconds — by GPS or by tapping the map — and the
+community keeps the map trustworthy by confirming or disputing each report.
 
-First, run the development server:
+The map is clamped to Bangladesh, floods render as a blue density heatmap (the darker
+and larger the blob, the more reports and the deeper the water), and everything is
+shared live across everyone viewing the map.
+
+---
+
+## Features
+
+- **Live flood map** — OpenStreetMap/CARTO base tiles, hard-clamped to Bangladesh
+  (`maxBounds`), zoom 6.4 → 19 (street level).
+- **Density heatmap** — more reports render darker; deeper water renders darker; blob
+  radius scales with zoom so each report keeps a roughly constant real-world footprint.
+- **Report a flood** — GPS (auto) or manual pin. Optional water depth
+  (Ankle / Knee / Waist / Above) and note. A short per-device cooldown prevents spam.
+- **Verify any report** — tap a report pin anywhere to see its detail and mark it
+  **Still flooded** or **Cleared now**. A report becomes *verified* after 2
+  confirmations and is removed after 2 disputes (one vote per device per report).
+- **Monitored areas** — known flood-prone districts (Sunamganj, Sylhet, Kurigram)
+  are tappable for an area-level overview and confirm/dispute.
+- **Search** — instant search across all 64 Bangladesh districts plus geocoded
+  sub-district areas, neighbourhoods, and landmarks (via a cached OSM proxy).
+- **No account, no local data** — anyone can view and contribute. Reports and votes
+  are server-authoritative; nothing sensitive is stored in the browser.
+- **Shared & live** — a 30-second poll keeps every open map in sync.
+
+## Tech stack
+
+- **[Next.js 16](https://nextjs.org)** (App Router) + **React 19** + **TypeScript**
+- **[Tailwind CSS v4](https://tailwindcss.com)** + **shadcn/ui** (base-nova) + **Lucide** icons
+- **[Leaflet](https://leafletjs.com)** + **react-leaflet** + **leaflet.heat**
+- **[Upstash Redis](https://upstash.com)** for shared storage (the successor to Vercel KV)
+- **[Bun](https://bun.sh)** as the package manager / runtime
+- Fonts: **Hanken Grotesk** + **IBM Plex Mono** via `next/font`
+
+## Getting started
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+bun install
+bun run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+The app **runs out of the box with no configuration** — without database
+credentials it uses an in-memory store (shared across tabs on the dev server, reset
+on restart). To make the map genuinely shared and persistent, add Upstash Redis
+credentials.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### Environment (optional, for a real shared database)
 
-## Learn More
+Create a free [Upstash Redis](https://upstash.com) database (no credit card required —
+via the Vercel dashboard → Storage → Upstash, or the Upstash console) and add a
+`.env` (or `.env.local`) file:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+KV_REST_API_URL=https://your-db.upstash.io
+KV_REST_API_TOKEN=your-token
+# Upstash also exposes these as UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN — either pair works.
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Restart the dev server. The map is now shared across all users and survives restarts.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Scripts
 
-## Deploy on Vercel
+| Command | Description |
+| --- | --- |
+| `bun run dev` | Start the dev server (Turbopack) |
+| `bun run build` | Production build |
+| `bun run start` | Serve the production build |
+| `bun run lint` | Run ESLint |
+| `bun run reset` | Dry-run: list the `fw:*` keys that would be deleted |
+| `bun run reset --yes` | Wipe all reports/votes → the map starts empty |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## API
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+All routes are server-side; the browser only talks to same-origin `/api/*`.
+
+| Method & path | Body / query | Purpose |
+| --- | --- | --- |
+| `GET /api/reports` | — | `{ reports, votes, myVotes }` — recent reports + area vote tallies |
+| `POST /api/reports` | `{ lat, lng, depth?, note? }` | Create a report (validated, rate-limited, BD-only) |
+| `POST /api/votes` | `{ reportId, kind }` | Confirm/dispute a specific report |
+| `POST /api/votes` | `{ region, kind }` | Confirm/dispute a monitored area |
+| `GET /api/geocode` | `?q=<query>` | Bangladesh area search (cached OSM proxy) |
+
+`kind` is `"confirmed"` or `"disputed"`.
+
+## Project structure
+
+```
+app/
+  page.tsx              # server component — SSR initial reports → <MapApp/>
+  layout.tsx            # fonts, metadata, viewport
+  globals.css           # Tailwind v4 theme + FloodWatch design tokens
+  error.tsx             # error boundary
+  api/
+    reports/route.ts    # GET (feed) + POST (create)
+    votes/route.ts      # region + per-report voting
+    geocode/route.ts    # OSM/Nominatim proxy (cached, rate-limited)
+components/floodwatch/
+  MapApp.tsx            # client root: provider + dynamic(ssr:false) map + overlays + sheets
+  map/                  # FloodMap, HeatLayer, ReportPins, MapControls
+  overlays/             # Onboarding, TopBar (search + filters), ReportButton, PlacingBanner
+  sheets/               # report flow, area detail, report detail, filters
+lib/floodwatch/
+  store.tsx             # React context + reducer, live polling, geolocation
+  geo.ts                # BD bounds, regions, distance/filter helpers
+  districts.ts          # 64 districts for search
+  server/store.ts       # Upstash Redis adapter (+ in-memory fallback), voting logic
+next.config.ts          # security headers (CSP, HSTS, X-Frame-Options, …)
+scripts/reset.ts        # `bun run reset`
+```
+
+## Security & privacy
+
+- Strict **Content-Security-Policy** plus `X-Frame-Options`, `X-Content-Type-Options`,
+  `Referrer-Policy`, `Permissions-Policy`, and HSTS (`next.config.ts`).
+- All input is validated server-side (coordinates must be inside Bangladesh, depth is
+  whitelisted, notes are length-capped and stripped of HTML).
+- Anti-abuse via per-IP rate limits (report cooldown, geocode budget) and per-IP,
+  per-report/area vote de-duplication. Report storage is client-agnostic and holds no
+  personal data.
+
+> IP-based limiting is best-effort for a no-account public app; for higher-traffic
+> deployments consider adding CAPTCHA/auth and a keyed geocoding provider.
+
+## Deploy
+
+Deploys to [Vercel](https://vercel.com) as a standard Next.js app. Add the
+`KV_REST_API_URL` / `KV_REST_API_TOKEN` environment variables (the Upstash Marketplace
+integration sets them automatically), then deploy.
