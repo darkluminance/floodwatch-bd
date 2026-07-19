@@ -12,7 +12,7 @@ import ReportModeSheet from "./sheets/ReportModeSheet";
 import LocatingModal from "./sheets/LocatingModal";
 import ReportDetailsSheet from "./sheets/ReportDetailsSheet";
 import DoneSheet from "./sheets/DoneSheet";
-import AreaSheet from "./sheets/AreaSheet";
+import ClusterSheet from "./sheets/ClusterSheet";
 import FilterSheet from "./sheets/FilterSheet";
 import ReportDetailSheet from "./sheets/ReportDetailSheet";
 
@@ -31,7 +31,7 @@ function Sheets() {
   if (isReport && ui.step === "locating") return <LocatingModal />;
   if (isReport && ui.step === "details") return <ReportDetailsSheet />;
   if (isReport && ui.step === "done") return <DoneSheet />;
-  if (ui.sheet === "area") return <AreaSheet />;
+  if (ui.sheet === "cluster") return <ClusterSheet />;
   if (ui.sheet === "filter") return <FilterSheet />;
   if (ui.sheet === "reportDetail") return <ReportDetailSheet />;
   return null;

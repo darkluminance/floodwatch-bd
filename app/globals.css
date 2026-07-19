@@ -214,7 +214,8 @@
 .fw-pin { filter: drop-shadow(0 4px 6px rgba(15, 27, 45, 0.35)); }
 /* Our marker icons are pure HTML — strip Leaflet's default chip styling */
 .leaflet-div-icon.fw-region-icon,
-.leaflet-div-icon.fw-amber-icon {
+.leaflet-div-icon.fw-amber-icon,
+.leaflet-div-icon.fw-cluster-icon {
   background: transparent;
   border: 0;
   width: 0 !important;

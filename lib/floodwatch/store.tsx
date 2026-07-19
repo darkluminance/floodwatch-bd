@@ -19,6 +19,7 @@ import {
   isInBangladesh,
   labelForPoint,
   nearestRegion,
+  type ReportCluster,
 } from "./geo";
 import type {
   Depth,
@@ -29,17 +30,25 @@ import type {
   VoteKind,
 } from "./types";
 
-/** How often the client re-fetches the shared feed (reports + votes), ms. */
+/** How often the client re-fetches the shared report feed, ms. */
 const POLL_MS = 30_000;
 
-export interface RegionTally {
-  confirm: number;
-  dispute: number;
-}
 interface Feed {
   reports: Report[];
-  votes: Record<string, RegionTally>;
-  myVotes: Record<string, VoteKind>;
+}
+
+/** A ClusterSheet's spot-vote tally + this device's own spot vote. */
+export interface LocationTally {
+  confirm: number;
+  dispute: number;
+  mine: VoteKind | null;
+}
+
+/** The currently open cluster (report ids + centroid), for the ClusterSheet. */
+interface ActiveCluster {
+  ids: string[];
+  lat: number;
+  lng: number;
 }
 
 const emptyDraft: DraftReport = {
@@ -53,10 +62,8 @@ const initialUI: UIState = {
   screen: "map",
   sheet: null,
   step: null,
-  area: null,
   draft: emptyDraft,
   filters: { time: "24h", verified: false },
-  vote: null,
   cooldownMsg: null,
   detailReportId: null,
   detailMsg: null,
@@ -76,11 +83,10 @@ type Action =
     }
   | { type: "SET_DEPTH"; depth: Depth }
   | { type: "SET_NOTE"; note: string }
-  | { type: "OPEN_AREA"; area: string; vote: VoteKind | null }
-  | { type: "SET_VOTE"; vote: VoteKind }
   | { type: "SET_TIME"; time: TimeRange }
   | { type: "TOGGLE_VERIFIED" }
   | { type: "SET_COOLDOWN_MSG"; msg: string | null }
+  | { type: "OPEN_CLUSTER" }
   | { type: "OPEN_REPORT_DETAIL"; reportId: string }
   | { type: "SET_DETAIL_MSG"; msg: string | null };
 
@@ -124,10 +130,6 @@ function reducer(state: UIState, action: Action): UIState {
       return { ...state, draft: { ...state.draft, depth: action.depth } };
     case "SET_NOTE":
       return { ...state, draft: { ...state.draft, note: action.note } };
-    case "OPEN_AREA":
-      return { ...state, sheet: "area", area: action.area, vote: action.vote };
-    case "SET_VOTE":
-      return { ...state, vote: action.vote };
     case "SET_TIME":
       return { ...state, filters: { ...state.filters, time: action.time } };
     case "TOGGLE_VERIFIED":
@@ -137,6 +139,13 @@ function reducer(state: UIState, action: Action): UIState {
       };
     case "SET_COOLDOWN_MSG":
       return { ...state, cooldownMsg: action.msg };
+    case "OPEN_CLUSTER":
+      return {
+        ...state,
+        sheet: "cluster",
+        detailReportId: null,
+        detailMsg: null,
+      };
     case "OPEN_REPORT_DETAIL":
       return {
         ...state,
@@ -156,10 +165,6 @@ export interface FloodStore {
   showOnboarding: boolean;
   reports: Report[];
   visibleReports: Report[];
-  /** This device's own vote per region (server-tracked by IP). */
-  myVotes: Record<string, VoteKind>;
-  /** Shared vote tallies per region. */
-  tallies: Record<string, RegionTally>;
   // onboarding
   allowLocation: () => void;
   skipLocation: () => void;
@@ -175,12 +180,15 @@ export interface FloodStore {
   setNote: (n: string) => void;
   submitReport: () => void;
   finishReport: () => void;
-  // area
-  openArea: (key: string) => void;
-  confirmArea: () => void;
-  disputeArea: () => void;
   reportHere: () => void;
-  // per-report verification
+  // clusters (aggregate spot view)
+  activeCluster: ActiveCluster | null;
+  clusterExpanded: boolean;
+  locationTally: LocationTally | null;
+  openCluster: (cluster: ReportCluster) => void;
+  voteLocation: (kind: VoteKind) => void;
+  setClusterExpanded: (v: boolean) => void;
+  // per-report verification (drill-down)
   openReportDetail: (reportId: string) => void;
   voteReport: (kind: VoteKind) => void;
   /** Report IDs this device voted on this session (for button state). */
@@ -203,9 +211,6 @@ export function useFlood(): FloodStore {
   return ctx;
 }
 
-const EMPTY_TALLIES: Record<string, RegionTally> = {};
-const EMPTY_MY_VOTES: Record<string, VoteKind> = {};
-
 export function FloodProvider({
   children,
   initialReports = [],
@@ -216,17 +221,16 @@ export function FloodProvider({
 }) {
   const [ui, dispatch] = useReducer(reducer, initialUI);
   const [reports, setReports] = useState<Report[]>(initialReports);
-  const [tallies, setTallies] =
-    useState<Record<string, RegionTally>>(EMPTY_TALLIES);
-  const [myVotes, setMyVotes] =
-    useState<Record<string, VoteKind>>(EMPTY_MY_VOTES);
   // Onboarding is intentionally in-memory only (no local storage): shown once
   // per page load, dismissed for the rest of the session.
   const [onboardingDone, setOnboardingDone] = useState(false);
-  // Reports this device voted on this session (server enforces real dedup).
+  // Votes this device cast this session (server enforces the real dedup).
   const [votedReports, setVotedReports] = useState<Set<string>>(
     () => new Set(),
   );
+  const [activeCluster, setActiveCluster] = useState<ActiveCluster | null>(null);
+  const [clusterExpanded, setClusterExpanded] = useState(false);
+  const [locationTally, setLocationTally] = useState<LocationTally | null>(null);
 
   const mapRef = useRef<LeafletMap | null>(null);
 
@@ -237,8 +241,6 @@ export function FloodProvider({
       if (!res.ok) return;
       const data = (await res.json()) as Feed;
       setReports(data.reports);
-      setTallies(data.votes ?? EMPTY_TALLIES);
-      setMyVotes(data.myVotes ?? EMPTY_MY_VOTES);
     } catch {
       /* offline / transient — keep last good data */
     }
@@ -313,7 +315,12 @@ export function FloodProvider({
   // ---- report flow ----
   const openReport = useCallback(() => dispatch({ type: "OPEN_REPORT" }), []);
   const openFilter = useCallback(() => dispatch({ type: "OPEN_FILTER" }), []);
-  const closeSheet = useCallback(() => dispatch({ type: "CLOSE_SHEET" }), []);
+  const closeSheet = useCallback(() => {
+    dispatch({ type: "CLOSE_SHEET" });
+    setActiveCluster(null);
+    setClusterExpanded(false);
+    setLocationTally(null);
+  }, []);
 
   const goDetailsWith = useCallback((lat: number, lng: number) => {
     const [cl, cn] = clampToBD(lat, lng);
@@ -405,47 +412,52 @@ export function FloodProvider({
     }
   }, [ui.draft]);
 
-  const finishReport = useCallback(() => dispatch({ type: "CLOSE_SHEET" }), []);
+  const finishReport = useCallback(() => closeSheet(), [closeSheet]);
+  const reportHere = useCallback(() => dispatch({ type: "OPEN_REPORT" }), []);
 
-  // ---- area ----
-  const openArea = useCallback(
-    (key: string) =>
-      dispatch({ type: "OPEN_AREA", area: key, vote: myVotes[key] ?? null }),
-    [myVotes],
-  );
+  // ---- clusters (aggregate spot view) ----
+  const openCluster = useCallback((cluster: ReportCluster) => {
+    setActiveCluster({ ids: cluster.ids, lat: cluster.lat, lng: cluster.lng });
+    setClusterExpanded(false);
+    setLocationTally(null);
+    dispatch({ type: "OPEN_CLUSTER" });
+    // Load the shared spot tally for the cluster centroid.
+    fetch(`/api/votes?lat=${cluster.lat}&lng=${cluster.lng}`, {
+      cache: "no-store",
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((t: LocationTally | null) => {
+        if (t) setLocationTally(t);
+      })
+      .catch(() => {});
+  }, []);
 
-  const castVote = useCallback(
+  const voteLocation = useCallback(
     async (kind: VoteKind) => {
-      const region = ui.area;
-      if (!region || myVotes[region]) return;
+      const c = activeCluster;
+      if (!c || locationTally?.mine) return;
       // optimistic
-      dispatch({ type: "SET_VOTE", vote: kind });
-      setMyVotes((prev) => ({ ...prev, [region]: kind }));
-      setTallies((prev) => {
-        const cur = prev[region] ?? { confirm: 0, dispute: 0 };
+      setLocationTally((prev) => {
+        const base = prev ?? { confirm: 0, dispute: 0, mine: null };
         const field = kind === "confirmed" ? "confirm" : "dispute";
-        return { ...prev, [region]: { ...cur, [field]: cur[field] + 1 } };
+        return { ...base, [field]: base[field] + 1, mine: kind };
       });
       try {
         await fetch("/api/votes", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ region, kind }),
+          body: JSON.stringify({ lat: c.lat, lng: c.lng, kind }),
         });
       } catch {
-        /* best-effort; poll reconciles tallies */
+        /* best-effort; the tally re-loads next time the sheet opens */
       }
     },
-    [ui.area, myVotes],
+    [activeCluster, locationTally],
   );
-  const confirmArea = useCallback(() => castVote("confirmed"), [castVote]);
-  const disputeArea = useCallback(() => castVote("disputed"), [castVote]);
-  const reportHere = useCallback(() => dispatch({ type: "OPEN_REPORT" }), []);
 
-  // ---- per-report verification ----
+  // ---- per-report verification (drill-down) ----
   const openReportDetail = useCallback(
-    (reportId: string) =>
-      dispatch({ type: "OPEN_REPORT_DETAIL", reportId }),
+    (reportId: string) => dispatch({ type: "OPEN_REPORT_DETAIL", reportId }),
     [],
   );
 
@@ -517,8 +529,6 @@ export function FloodProvider({
       showOnboarding,
       reports,
       visibleReports,
-      myVotes,
-      tallies,
       allowLocation,
       skipLocation,
       openReport,
@@ -532,10 +542,13 @@ export function FloodProvider({
       setNote,
       submitReport,
       finishReport,
-      openArea,
-      confirmArea,
-      disputeArea,
       reportHere,
+      activeCluster,
+      clusterExpanded,
+      locationTally,
+      openCluster,
+      voteLocation,
+      setClusterExpanded,
       openReportDetail,
       voteReport,
       votedReports,
@@ -551,8 +564,6 @@ export function FloodProvider({
       showOnboarding,
       reports,
       visibleReports,
-      myVotes,
-      tallies,
       allowLocation,
       skipLocation,
       openReport,
@@ -566,10 +577,13 @@ export function FloodProvider({
       setNote,
       submitReport,
       finishReport,
-      openArea,
-      confirmArea,
-      disputeArea,
       reportHere,
+      activeCluster,
+      clusterExpanded,
+      locationTally,
+      openCluster,
+      voteLocation,
+      setClusterExpanded,
       openReportDetail,
       voteReport,
       votedReports,

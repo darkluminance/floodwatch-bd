@@ -2,7 +2,6 @@ import {
   addReport,
   clientIp,
   CooldownError,
-  getVotes,
   isSameOrigin,
   listReports,
   OutOfBoundsError,
@@ -11,14 +10,9 @@ import {
 // Reads request headers and mutates a datastore — always run at request time.
 export const dynamic = "force-dynamic";
 
-export async function GET(request: Request) {
-  const ip = clientIp(request);
-  const [reports, votes] = await Promise.all([listReports(), getVotes(ip)]);
-  return Response.json({
-    reports,
-    votes: votes.tallies,
-    myVotes: votes.mine,
-  });
+export async function GET() {
+  const reports = await listReports();
+  return Response.json({ reports });
 }
 
 export async function POST(request: Request) {

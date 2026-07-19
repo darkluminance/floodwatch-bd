@@ -11,9 +11,19 @@ import type { Depth, Report, VoteKind } from "../types";
 
 const REPORTS_KEY = "fw:reports";
 const VOTES_KEY = "fw:votes"; // hash, fields `${region}:confirm|dispute`
+const LOCATION_VOTES_KEY = "fw:lvotes"; // hash, fields `${cell}:confirm|dispute`
 const cooldownKey = (ip: string) => `fw:cooldown:${ip}`;
 const votedKey = (region: string, ip: string) => `fw:voted:${region}:${ip}`;
 const reportVotedKey = (id: string, ip: string) => `fw:rvoted:${id}:${ip}`;
+const locationVotedKey = (cell: string, ip: string) =>
+  `fw:lvoted:${cell}:${ip}`;
+
+/** A ~1.1km grid cell (2-decimal coords) used as the "spot" vote key. */
+function locationCell(lat: number, lng: number): string {
+  return `${(Math.round(lat * 100) / 100).toFixed(2)},${(
+    Math.round(lng * 100) / 100
+  ).toFixed(2)}`;
+}
 
 const COOLDOWN_SECONDS = 180;
 const MAX_REPORTS = 500;
@@ -116,6 +126,7 @@ interface KV {
   /** INCR key, setting EX <seconds> on first increment. Returns new count. */
   incr(key: string, seconds: number): Promise<number>;
   hincrby(key: string, field: string, by: number): Promise<number>;
+  hget(key: string, field: string): Promise<string | null>;
   hgetall(key: string): Promise<Record<string, string>>;
 }
 
@@ -165,6 +176,9 @@ class RedisKV implements KV {
   }
   hincrby(key: string, field: string, by: number) {
     return this.r.hincrby(key, field, by);
+  }
+  async hget(key: string, field: string) {
+    return (await this.r.hget(key, field)) as string | null;
   }
   async hgetall(key: string) {
     // With automaticDeserialization disabled, Upstash may return HGETALL as a
@@ -268,6 +282,10 @@ class MemoryKV implements KV {
     h.set(field, next);
     this.hashes.set(key, h);
     return Promise.resolve(next);
+  }
+  hget(key: string, field: string) {
+    const v = this.hashes.get(key)?.get(field);
+    return Promise.resolve(v === undefined ? null : String(v));
   }
   hgetall(key: string) {
     const h = this.hashes.get(key);
@@ -441,6 +459,63 @@ export async function castVote(
   if (!first) throw new AlreadyVotedError();
   const field = `${region}:${kind === "confirmed" ? "confirm" : "dispute"}`;
   await kv.hincrby(VOTES_KEY, field, 1);
+}
+
+export interface LocationTally {
+  confirm: number;
+  dispute: number;
+  mine: VoteKind | null;
+}
+
+/** This viewer's vote + shared tally for the ~1km cell around a coordinate. */
+export async function getLocationVote(
+  lat: number,
+  lng: number,
+  ip: string,
+): Promise<LocationTally> {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { confirm: 0, dispute: 0, mine: null };
+  }
+  const kv = getKV();
+  const cell = locationCell(lat, lng);
+  const [confirm, dispute, mineRaw] = await Promise.all([
+    kv.hget(LOCATION_VOTES_KEY, `${cell}:confirm`),
+    kv.hget(LOCATION_VOTES_KEY, `${cell}:dispute`),
+    kv.getStr(locationVotedKey(cell, ip)),
+  ]);
+  const mine = mineRaw === "confirmed" || mineRaw === "disputed" ? mineRaw : null;
+  return { confirm: Number(confirm) || 0, dispute: Number(dispute) || 0, mine };
+}
+
+/**
+ * Confirm/dispute a "spot" (~1km cell). One vote per device/IP per cell. This
+ * is an aggregate community signal, deliberately independent of individual
+ * reports' verified/hidden state.
+ */
+export async function castLocationVote(
+  lat: number,
+  lng: number,
+  kind: VoteKind,
+  ip: string,
+): Promise<void> {
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng) ||
+    !isInBangladesh(lat, lng) ||
+    (kind !== "confirmed" && kind !== "disputed")
+  ) {
+    throw new InvalidVoteError();
+  }
+  const kv = getKV();
+  const cell = locationCell(lat, lng);
+  const first = await kv.setNxVal(
+    locationVotedKey(cell, ip),
+    kind,
+    VOTE_KEY_TTL_SECONDS,
+  );
+  if (!first) throw new AlreadyVotedError();
+  const field = `${cell}:${kind === "confirmed" ? "confirm" : "dispute"}`;
+  await kv.hincrby(LOCATION_VOTES_KEY, field, 1);
 }
 
 export interface ReportVoteResult {

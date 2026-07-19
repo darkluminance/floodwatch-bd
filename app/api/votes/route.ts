@@ -1,7 +1,9 @@
 import {
   AlreadyVotedError,
+  castLocationVote,
   castVote,
   clientIp,
+  getLocationVote,
   InvalidVoteError,
   isSameOrigin,
   ReportNotFoundError,
@@ -10,6 +12,15 @@ import {
 import type { VoteKind } from "@/lib/floodwatch/types";
 
 export const dynamic = "force-dynamic";
+
+/** Read the shared spot (location) tally + this viewer's vote. */
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const lat = Number(url.searchParams.get("lat"));
+  const lng = Number(url.searchParams.get("lng"));
+  const tally = await getLocationVote(lat, lng, clientIp(request));
+  return Response.json(tally);
+}
 
 export async function POST(request: Request) {
   if (!isSameOrigin(request)) {
@@ -23,9 +34,11 @@ export async function POST(request: Request) {
     return Response.json({ message: "Invalid request body." }, { status: 400 });
   }
 
-  const { region, reportId, kind } = (body ?? {}) as {
+  const { region, reportId, lat, lng, kind } = (body ?? {}) as {
     region?: string;
     reportId?: string;
+    lat?: number;
+    lng?: number;
     kind?: VoteKind;
   };
   const ip = clientIp(request);
@@ -39,7 +52,12 @@ export async function POST(request: Request) {
         { status: 201 },
       );
     }
-    // Area-level vote (aggregate confirm/dispute for a monitored region).
+    // Spot vote (confirm/dispute a ~1km location cell).
+    if (typeof lat === "number" && typeof lng === "number") {
+      await castLocationVote(lat, lng, kind as VoteKind, ip);
+      return Response.json({ ok: true }, { status: 201 });
+    }
+    // Area-level vote (legacy monitored region).
     await castVote(region ?? "", kind as VoteKind, ip);
     return Response.json({ ok: true }, { status: 201 });
   } catch (err) {

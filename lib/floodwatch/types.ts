@@ -41,7 +41,12 @@ export interface Filters {
 }
 
 export type Screen = "onboarding" | "map";
-export type SheetKind = "report" | "area" | "filter" | "reportDetail" | null;
+export type SheetKind =
+  | "report"
+  | "cluster"
+  | "filter"
+  | "reportDetail"
+  | null;
 export type ReportStep =
   | "mode"
   | "locating"
@@ -54,12 +59,8 @@ export interface UIState {
   screen: Screen;
   sheet: SheetKind;
   step: ReportStep;
-  /** Selected area/region key for the area detail sheet. */
-  area: string | null;
   draft: DraftReport;
   filters: Filters;
-  /** Vote recorded for the currently open area sheet. */
-  vote: VoteKind | null;
   /** Message shown when a submission is blocked by the cooldown. */
   cooldownMsg: string | null;
   /** Report shown in the per-report detail sheet. */

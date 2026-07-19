@@ -1,4 +1,4 @@
-import type { Report, TimeRange } from "./types";
+import type { Depth, Report, TimeRange } from "./types";
 
 /** Bangladesh bounding box [south, west, north, east]. */
 export const BD_BOUNDS: [[number, number], [number, number]] = [
@@ -145,6 +145,82 @@ export function densityLabel(count: number): string {
   if (count <= 3) return "A few recent reports";
   if (count <= 9) return "Rising reports — monitor closely";
   return "High density — many recent reports";
+}
+
+export interface ReportCluster {
+  key: string;
+  lat: number; // centroid
+  lng: number;
+  count: number;
+  verifiedCount: number;
+  depthCounts: Partial<Record<Depth, number>>;
+  ids: string[];
+}
+
+/**
+ * Bin reports into a zoom-adaptive geographic grid so the map shows a handful
+ * of count badges instead of one marker per report. Cell size tracks a target
+ * on-screen pixel size, so clusters merge as you zoom out and split as you zoom
+ * in.
+ */
+export function clusterReports(
+  reports: Report[],
+  zoom: number,
+  targetPx = 56,
+): ReportCluster[] {
+  const deg = (targetPx * 360) / (256 * Math.pow(2, zoom));
+  const cells = new Map<
+    string,
+    ReportCluster & { sumLat: number; sumLng: number }
+  >();
+  for (const r of reports) {
+    const key = `${Math.floor(r.lng / deg)}:${Math.floor(r.lat / deg)}`;
+    let c = cells.get(key);
+    if (!c) {
+      c = {
+        key,
+        lat: 0,
+        lng: 0,
+        count: 0,
+        verifiedCount: 0,
+        depthCounts: {},
+        ids: [],
+        sumLat: 0,
+        sumLng: 0,
+      };
+      cells.set(key, c);
+    }
+    c.sumLat += r.lat;
+    c.sumLng += r.lng;
+    c.count += 1;
+    c.ids.push(r.id);
+    if (r.verified) c.verifiedCount += 1;
+    if (r.depth) c.depthCounts[r.depth] = (c.depthCounts[r.depth] ?? 0) + 1;
+  }
+  return [...cells.values()].map((c) => ({
+    key: c.key,
+    count: c.count,
+    verifiedCount: c.verifiedCount,
+    depthCounts: c.depthCounts,
+    ids: c.ids,
+    lat: c.sumLat / c.count,
+    lng: c.sumLng / c.count,
+  }));
+}
+
+/** The most-reported depth in a cluster, if any. */
+export function commonDepth(
+  depthCounts: Partial<Record<Depth, number>>,
+): Depth | null {
+  let best: Depth | null = null;
+  let bestN = 0;
+  for (const [d, n] of Object.entries(depthCounts)) {
+    if ((n ?? 0) > bestN) {
+      bestN = n ?? 0;
+      best = d as Depth;
+    }
+  }
+  return best;
 }
 
 /** Count of reports attributed to a region within the window. */
