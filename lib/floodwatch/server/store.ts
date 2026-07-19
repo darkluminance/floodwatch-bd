@@ -1,5 +1,5 @@
 import { Redis } from "@upstash/redis";
-import { isInBangladesh, nearestRegion, REGIONS } from "../geo";
+import { isInBangladesh, nearestRegion, REGIONS, roundCoord } from "../geo";
 import type { Depth, Report, VoteKind } from "../types";
 
 /**
@@ -33,7 +33,15 @@ export class ReportNotFoundError extends Error {}
 
 /** Confirmations needed to mark a report verified; disputes to clear it. */
 export const CONFIRM_THRESHOLD = 2;
-export const DISPUTE_THRESHOLD = 2;
+// Higher than CONFIRM_THRESHOLD, and only acted on net-negative (see
+// voteReport), so a report with real community support resists takedown by a
+// small number of hostile/spoofed IPs.
+export const DISPUTE_THRESHOLD = 3;
+
+/** How long a per-voter dedup key needs to live: a vote past the report
+ * retention window can never matter again, so tie the two together instead of
+ * growing Redis forever. */
+const VOTE_KEY_TTL_SECONDS = WINDOW_MS / 1000;
 
 /**
  * Client IP for rate-limiting. Assumes a single trusted reverse proxy
@@ -53,7 +61,40 @@ export function clientIp(request: Request): string {
       .filter(Boolean);
     if (parts.length) return parts[parts.length - 1].slice(0, 64);
   }
+  // No proxy header at all. In dev (no Vercel in front) that's expected, so
+  // share one "local" identity for a smooth single-machine experience. In
+  // production it means the deploy's reverse proxy isn't set up as assumed —
+  // fail closed with a random per-request identity rather than silently
+  // collapsing every visitor onto one shared cooldown/vote bucket, which
+  // would let any anonymous request rate-limit the entire site.
+  if (process.env.NODE_ENV === "production") return crypto.randomUUID();
   return "local";
+}
+
+/**
+ * Reject cross-site POSTs so another site can't submit reports/votes that get
+ * attributed to a victim's IP. `Sec-Fetch-Site` (sent by all modern browsers)
+ * is the primary signal; `Origin` is the fallback for the rare client that
+ * omits it. Requests with neither header (e.g. non-browser API clients) are
+ * allowed through, same as before this check existed.
+ */
+export function isSameOrigin(request: Request): boolean {
+  const fetchSite = request.headers.get("sec-fetch-site");
+  if (fetchSite) {
+    return (
+      fetchSite === "same-origin" ||
+      fetchSite === "same-site" ||
+      fetchSite === "none"
+    );
+  }
+
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === new URL(request.url).host;
+  } catch {
+    return false;
+  }
 }
 
 // ---- Minimal KV interface implemented by both backends ----
@@ -64,10 +105,12 @@ interface KV {
   lset(key: string, index: number, val: string): Promise<unknown>;
   lrem(key: string, count: number, val: string): Promise<number>;
   getStr(key: string): Promise<string | null>;
+  /** MGET across multiple keys, preserving order (null for misses). */
+  mget(keys: string[]): Promise<(string | null)[]>;
   /** SET key 1 NX EX <seconds>. Returns true if newly set (not on cooldown). */
   setNxEx(key: string, seconds: number): Promise<boolean>;
-  /** SET key <val> NX. Returns true if newly set. */
-  setNxVal(key: string, val: string): Promise<boolean>;
+  /** SET key <val> NX [EX <seconds>]. Returns true if newly set. */
+  setNxVal(key: string, val: string, ttlSeconds?: number): Promise<boolean>;
   /** SET key <val> EX <seconds> (plain cache write). */
   setEx(key: string, val: string, seconds: number): Promise<void>;
   /** INCR key, setting EX <seconds> on first increment. Returns new count. */
@@ -96,12 +139,20 @@ class RedisKV implements KV {
   async getStr(key: string) {
     return (await this.r.get(key)) as string | null;
   }
+  async mget(keys: string[]) {
+    if (keys.length === 0) return [];
+    return (await this.r.mget(...keys)) as (string | null)[];
+  }
   async setNxEx(key: string, seconds: number) {
     const res = await this.r.set(key, "1", { nx: true, ex: seconds });
     return res === "OK";
   }
-  async setNxVal(key: string, val: string) {
-    const res = await this.r.set(key, val, { nx: true });
+  async setNxVal(key: string, val: string, ttlSeconds?: number) {
+    const res = await this.r.set(
+      key,
+      val,
+      ttlSeconds ? { nx: true, ex: ttlSeconds } : { nx: true },
+    );
     return res === "OK";
   }
   async setEx(key: string, val: string, seconds: number) {
@@ -181,6 +232,9 @@ class MemoryKV implements KV {
     if (!c || c.exp <= Date.now()) return Promise.resolve(null);
     return Promise.resolve(c.v);
   }
+  mget(keys: string[]) {
+    return Promise.all(keys.map((k) => this.getStr(k)));
+  }
   private trySet(key: string, val: string, exp: number): boolean {
     const cur = this.scalars.get(key);
     if (cur && cur.exp > Date.now()) return false;
@@ -190,8 +244,9 @@ class MemoryKV implements KV {
   setNxEx(key: string, seconds: number) {
     return Promise.resolve(this.trySet(key, "1", Date.now() + seconds * 1000));
   }
-  setNxVal(key: string, val: string) {
-    return Promise.resolve(this.trySet(key, val, Infinity));
+  setNxVal(key: string, val: string, ttlSeconds?: number) {
+    const exp = ttlSeconds ? Date.now() + ttlSeconds * 1000 : Infinity;
+    return Promise.resolve(this.trySet(key, val, exp));
   }
   setEx(key: string, val: string, seconds: number) {
     this.scalars.set(key, { v: val, exp: Date.now() + seconds * 1000 });
@@ -239,6 +294,14 @@ function getKV(): KV {
     globalForKV.__fwKV = new RedisKV(
       new Redis({ url, token, automaticDeserialization: false }),
     );
+  } else if (process.env.NODE_ENV === "production") {
+    // The in-memory fallback silently loses data on every cold start and
+    // splits state across serverless instances — acceptable for local dev,
+    // never for a live deploy. Fail loudly instead of shipping broken.
+    throw new Error(
+      "[floodwatch] KV_REST_API_URL/KV_REST_API_TOKEN are required in production " +
+        "(the in-memory store is dev-only and does not persist or share state).",
+    );
   } else {
     if (!globalForKV.__fwKVWarned) {
       console.warn(
@@ -268,7 +331,7 @@ export async function listReports(): Promise<Report[]> {
   const cutoff = Date.now() - WINDOW_MS;
   return raw
     .map(parseReport)
-    .filter((r): r is Report => !!r && r.createdAt >= cutoff);
+    .filter((r): r is Report => !!r && r.createdAt >= cutoff && !r.hidden);
 }
 
 const DEPTHS: Depth[] = ["Ankle", "Knee", "Waist", "Above"];
@@ -278,11 +341,20 @@ export async function addReport(
   input: { lat: number; lng: number; depth: unknown; note: unknown },
   ip: string,
 ): Promise<Report> {
-  const lat = Number(input.lat);
-  const lng = Number(input.lng);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !isInBangladesh(lat, lng)) {
+  const rawLat = Number(input.lat);
+  const rawLng = Number(input.lng);
+  if (
+    !Number.isFinite(rawLat) ||
+    !Number.isFinite(rawLng) ||
+    !isInBangladesh(rawLat, rawLng)
+  ) {
     throw new OutOfBoundsError();
   }
+  // Round to ~100m *after* bounds validation, before persisting — the exact
+  // device location (often a reporter's home, from the "auto" geolocation
+  // flow) is never written to the shared, publicly-readable store.
+  const lat = roundCoord(rawLat);
+  const lng = roundCoord(rawLng);
 
   const kv = getKV();
   const allowed = await kv.setNxEx(cooldownKey(ip), COOLDOWN_SECONDS);
@@ -340,10 +412,11 @@ export async function getVotes(ip: string): Promise<{
   }
 
   const mine: Record<string, VoteKind> = {};
-  for (const region of REGIONS) {
-    const v = await kv.getStr(votedKey(region.key, ip));
+  const votedVals = await kv.mget(REGIONS.map((r) => votedKey(r.key, ip)));
+  REGIONS.forEach((region, i) => {
+    const v = votedVals[i];
     if (v === "confirmed" || v === "disputed") mine[region.key] = v;
-  }
+  });
   return { tallies, mine };
 }
 
@@ -360,7 +433,11 @@ export async function castVote(
     throw new InvalidVoteError();
   }
   const kv = getKV();
-  const first = await kv.setNxVal(votedKey(region, ip), kind);
+  const first = await kv.setNxVal(
+    votedKey(region, ip),
+    kind,
+    VOTE_KEY_TTL_SECONDS,
+  );
   if (!first) throw new AlreadyVotedError();
   const field = `${region}:${kind === "confirmed" ? "confirm" : "dispute"}`;
   await kv.hincrby(VOTES_KEY, field, 1);
@@ -393,28 +470,39 @@ export async function voteReport(
 
   const raw = await kv.lrange(REPORTS_KEY, 0, -1);
   let index = -1;
-  let rawEntry = "";
   let report: Report | null = null;
   for (let i = 0; i < raw.length; i++) {
     const r = parseReport(raw[i]);
     if (r && r.id === reportId) {
       index = i;
-      rawEntry = raw[i];
       report = r;
       break;
     }
   }
-  if (!report) throw new ReportNotFoundError();
+  // Already-hidden reports are off the map — treat like they don't exist.
+  if (!report || report.hidden) throw new ReportNotFoundError();
 
   // Dedup only after we know the report exists.
-  const first = await kv.setNxVal(reportVotedKey(reportId, ip), kind);
+  const first = await kv.setNxVal(
+    reportVotedKey(reportId, ip),
+    kind,
+    VOTE_KEY_TTL_SECONDS,
+  );
   if (!first) throw new AlreadyVotedError();
 
   if (kind === "confirmed") report.votes.confirm += 1;
   else report.votes.dispute += 1;
 
-  if (report.votes.dispute >= DISPUTE_THRESHOLD) {
-    await kv.lrem(REPORTS_KEY, 1, rawEntry);
+  // Soft-delete (hide, don't erase) once disputes clearly outweigh
+  // confirmations — a report with real community support resists takedown
+  // by a small number of hostile or spoofed IPs, and hiding (vs. `lrem`)
+  // keeps the data recoverable instead of silently destroying it.
+  if (
+    report.votes.dispute >= DISPUTE_THRESHOLD &&
+    report.votes.dispute > report.votes.confirm
+  ) {
+    report.hidden = true;
+    await kv.lset(REPORTS_KEY, index, JSON.stringify(report));
     return { report, verified: false, removed: true };
   }
 

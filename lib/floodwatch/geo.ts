@@ -98,6 +98,12 @@ export function formatCoords(lat: number, lng: number): string {
   return `${lat.toFixed(2)}°N, ${lng.toFixed(2)}°E`;
 }
 
+/** Round to ~100m precision so published reports don't reveal a device's
+ * exact location (e.g. a reporter's home from the "auto" geolocation flow). */
+export function roundCoord(n: number): number {
+  return Math.round(n * 1000) / 1000;
+}
+
 export function isInBangladesh(lat: number, lng: number): boolean {
   const [[s, w], [n, e]] = BD_BOUNDS;
   return lat >= s && lat <= n && lng >= w && lng <= e;

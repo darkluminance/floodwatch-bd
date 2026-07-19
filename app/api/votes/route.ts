@@ -3,6 +3,7 @@ import {
   castVote,
   clientIp,
   InvalidVoteError,
+  isSameOrigin,
   ReportNotFoundError,
   voteReport,
 } from "@/lib/floodwatch/server/store";
@@ -11,6 +12,10 @@ import type { VoteKind } from "@/lib/floodwatch/types";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+  if (!isSameOrigin(request)) {
+    return Response.json({ message: "Forbidden." }, { status: 403 });
+  }
+
   let body: unknown;
   try {
     body = await request.json();

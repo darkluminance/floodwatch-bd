@@ -3,6 +3,7 @@ import {
   clientIp,
   CooldownError,
   getVotes,
+  isSameOrigin,
   listReports,
   OutOfBoundsError,
 } from "@/lib/floodwatch/server/store";
@@ -21,6 +22,10 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOrigin(request)) {
+    return Response.json({ message: "Forbidden." }, { status: 403 });
+  }
+
   let body: unknown;
   try {
     body = await request.json();

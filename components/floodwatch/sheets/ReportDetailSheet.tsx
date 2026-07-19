@@ -86,6 +86,9 @@ export default function ReportDetailSheet() {
           <div className="font-mono text-[11px] text-[#7C8794]">
             {formatCoords(report.lat, report.lng)}
           </div>
+          <div className="mt-0.5 text-[10.5px] text-flood-ink-4">
+            Location approximate (~100m) for reporter privacy
+          </div>
         </div>
       </div>
 

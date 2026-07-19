@@ -19,6 +19,8 @@ export interface Report {
   region?: string;
   /** True for reports created by this device in this session/history. */
   mine?: boolean;
+  /** Soft-deleted (cleared by disputes) — excluded from listReports. */
+  hidden?: boolean;
 }
 
 export type ReportMode = "auto" | "manual";
